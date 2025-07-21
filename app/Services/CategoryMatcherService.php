@@ -136,7 +136,7 @@ class CategoryMatcherService
 
             // مرتب‌سازی دسته‌بندی‌ها بر اساس سطح
             usort($categories, fn($a, $b) => ($b['level'] ?? 0) <=> ($a['level'] ?? 0));
-            
+
             foreach ($categories as $categoryData) {
                 if (!isset($categoryData['name'])) {
                     continue;
