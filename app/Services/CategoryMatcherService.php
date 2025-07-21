@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Product;
+use App\Models\Brand;
 use App\Models\Category;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -64,8 +65,210 @@ class CategoryMatcherService
             return;
         }
 
+        // تخصیص دسته‌بندی‌ها
         $this->assignCategories($product, $item['categories']);
+
+        // تخصیص برند
+        if (isset($item['brand']) && !is_null($item['brand'])) {
+            $this->assignBrand($product, $item['brand']);
+        }
+
+        // تخصیص توضیحات کلیدی و عمومی
+        $this->assignSpecifications($product, $item);
+
         $this->stats['matched']++;
+    }
+
+    /**
+     * تخصیص برند به محصول
+     */
+    private function assignBrand(Product $product, string $brandName): void
+    {
+        try {
+            // حذف برندهای قبلی
+            DB::table('catables')
+                ->where('catables_id', $product->id)
+                ->where('catables_type', 'App\Models\Brand')
+                ->delete();
+
+            $brand = $this->findOrCreateBrand($brandName);
+
+            if ($brand) {
+                DB::table('catables')->insert([
+                    'catables_id' => $product->id,
+                    'category_id' => $brand->id,
+                    'catables_type' => 'App\Models\Brand'
+                ]);
+
+                Log::info("برند محصول به‌روزرسانی شد", [
+                    'product_id' => $product->id,
+                    'brand' => $brandName
+                ]);
+            }
+
+        } catch (\Exception $e) {
+            Log::error("خطا در تخصیص برند", [
+                'product_id' => $product->id,
+                'brand' => $brandName,
+                'error' => $e->getMessage()
+            ]);
+        }
+    }
+
+    /**
+     * یافتن یا ایجاد برند
+     */
+    private function findOrCreateBrand(string $brandName): ?Brand
+    {
+        // جستجوی مستقیم
+        $brand = Brand::where('name', $brandName)->first();
+
+        if ($brand) {
+            return $brand;
+        }
+
+        // جستجوی فازی
+        $brand = $this->fuzzySearchBrand($brandName);
+
+        if ($brand) {
+            return $brand;
+        }
+
+        // ایجاد برند جدید
+        return $this->createBrand($brandName);
+    }
+
+    /**
+     * جستجوی فازی برندها
+     */
+    private function fuzzySearchBrand(string $brandName): ?Brand
+    {
+        $normalizedName = $this->normalizeText($brandName);
+
+        $brands = Brand::select(['id', 'name'])->get();
+
+        foreach ($brands as $brand) {
+            $normalizedBrandName = $this->normalizeText($brand->name);
+            $similarity = $this->calculateSimilarity($normalizedName, $normalizedBrandName);
+
+            if ($similarity > 85) {
+                Log::info("برند با جستجوی فازی یافت شد", [
+                    'original' => $brandName,
+                    'found' => $brand->name,
+                    'similarity' => $similarity
+                ]);
+                return $brand;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * ایجاد برند جدید
+     */
+    private function createBrand(string $brandName): ?Brand
+    {
+        try {
+            $brand = Brand::create([
+                'name' => $brandName,
+                'slug' => $this->generateUniqueBrandSlug($brandName),
+                'nameSeo' => $brandName,
+            ]);
+
+            Log::info("برند جدید ایجاد شد", [
+                'name' => $brandName,
+                'id' => $brand->id
+            ]);
+
+            return $brand;
+
+        } catch (\Exception $e) {
+            Log::error("خطا در ایجاد برند جدید", [
+                'name' => $brandName,
+                'error' => $e->getMessage()
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * تولید slug یکتا برای برند
+     */
+    private function generateUniqueBrandSlug(string $text): string
+    {
+        $slug = $this->createSlug($text);
+        $originalSlug = $slug;
+        $counter = 1;
+
+        while (Brand::where('slug', $slug)->exists()) {
+            $slug = $originalSlug . '-' . $counter;
+            $counter++;
+        }
+
+        return $slug;
+    }
+
+    /**
+     * تخصیص توضیحات کلیدی و عمومی به محصول
+     */
+    private function assignSpecifications(Product $product, array $item): void
+    {
+        try {
+            $specifications = [];
+            $property = [];
+
+            // پردازش key_specs
+            if (isset($item['specifications']['key_specs']) && is_array($item['specifications']['key_specs'])) {
+                foreach ($item['specifications']['key_specs'] as $spec) {
+                    if (isset($spec['title']) && isset($spec['body'])) {
+                        $property[] = [
+                            'title' => $spec['title'],
+                            'body' => $spec['body']
+                        ];
+                    }
+                }
+            }
+
+            // پردازش general_specs
+            if (isset($item['specifications']['general_specs']) && is_array($item['specifications']['general_specs'])) {
+                foreach ($item['specifications']['general_specs'] as $spec) {
+                    if (isset($spec['title']) && isset($spec['body'])) {
+                        $specifications[] = [
+                            'title' => $spec['title'],
+                            'body' => $spec['body']
+                        ];
+                    }
+                }
+            }
+
+            // بروزرسانی فیلدهای محصول
+            $updateData = [];
+
+            if (!empty($property)) {
+                $updateData['property'] = $property;
+            }
+
+            if (!empty($specifications)) {
+                $updateData['specifications'] = $specifications;
+            }
+
+            if (!empty($updateData)) {
+                $product->update($updateData);
+
+                Log::info("توضیحات محصول به‌روزرسانی شد", [
+                    'product_id' => $product->id,
+                    'key_specs_count' => count($property),
+                    'general_specs_count' => count($specifications)
+                ]);
+            }
+
+        } catch (\Exception $e) {
+            Log::error("خطا در تخصیص توضیحات", [
+                'product_id' => $product->id,
+                'error' => $e->getMessage()
+            ]);
+        }
     }
 
     /**

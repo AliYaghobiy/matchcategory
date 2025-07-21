@@ -35,4 +35,14 @@ class Product extends Model
             'category_id'
         );
     }
+    public function brands(): BelongsToMany
+    {
+        return $this->morphToMany(
+            Brand::class,
+            'catables',
+            'catables',
+            'catables_id',
+            'category_id'
+        );
+    }
 }
