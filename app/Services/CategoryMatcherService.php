@@ -15,7 +15,9 @@ class CategoryMatcherService
         'processed' => 0,
         'matched' => 0,
         'not_found' => 0,
-        'categories_created' => 0
+        'categories_created' => 0,
+        'brands_created' => 0,
+        'brands_assigned' => 0
     ];
 
     public function __construct(int $userId = 39)
@@ -69,8 +71,8 @@ class CategoryMatcherService
         $this->assignCategories($product, $item['categories']);
 
         // تخصیص برند
-        if (isset($item['brand']) && !is_null($item['brand'])) {
-            $this->assignBrand($product, $item['brand']);
+        if (isset($item['brand']) && !empty(trim($item['brand']))) {
+            $this->assignBrand($product, trim($item['brand']));
         }
 
         // تخصیص توضیحات کلیدی و عمومی
@@ -80,37 +82,70 @@ class CategoryMatcherService
     }
 
     /**
-     * تخصیص برند به محصول
+     * تخصیص برند به محصول - کد تصحیح شده
      */
     private function assignBrand(Product $product, string $brandName): void
     {
         try {
-            // حذف برندهای قبلی
+            Log::info("شروع تخصیص برند", [
+                'product_id' => $product->id,
+                'product_title' => $product->title,
+                'brand_name' => $brandName
+            ]);
+
+            // حذف برندهای قبلی محصول
             DB::table('catables')
                 ->where('catables_id', $product->id)
-                ->where('catables_type', 'App\Models\Brand')
+                ->where('catables_type', 'App\\Models\\Product')
+                ->whereExists(function ($query) {
+                    $query->select(DB::raw(1))
+                        ->from('brands')
+                        ->whereColumn('brands.id', 'catables.category_id');
+                })
                 ->delete();
+
+            Log::info("برندهای قبلی محصول حذف شدند", ['product_id' => $product->id]);
 
             $brand = $this->findOrCreateBrand($brandName);
 
             if ($brand) {
+                // اختصاص برند جدید با ساختار صحیح
                 DB::table('catables')->insert([
-                    'catables_id' => $product->id,
-                    'category_id' => $brand->id,
-                    'catables_type' => 'App\Models\Brand'
+                    'category_id' => $brand->id,  // ID برند
+                    'catables_id' => $product->id,  // ID محصول
+                    'catables_type' => 'App\\Models\\Product'  // نوع مدل: Product
                 ]);
 
-                Log::info("برند محصول به‌روزرسانی شد", [
+                $this->stats['brands_assigned']++;
+
+                Log::info("برند با موفقیت به محصول اختصاص داده شد", [
                     'product_id' => $product->id,
-                    'brand' => $brandName
+                    'product_title' => $product->title,
+                    'brand_id' => $brand->id,
+                    'brand_name' => $brand->name,
+                    'original_brand_name' => $brandName
                 ]);
+
+                // تأیید اختصاص با کوئری بررسی
+                $verification = DB::table('catables')
+                    ->where('category_id', $brand->id)
+                    ->where('catables_id', $product->id)
+                    ->where('catables_type', 'App\\Models\\Product')
+                    ->exists();
+
+                if ($verification) {
+                    Log::info("تأیید: برند در جدول catables ثبت شده است");
+                } else {
+                    Log::error("خطا: برند در جدول catables ثبت نشده است");
+                }
             }
 
         } catch (\Exception $e) {
             Log::error("خطا در تخصیص برند", [
                 'product_id' => $product->id,
                 'brand' => $brandName,
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
             ]);
         }
     }
@@ -120,10 +155,16 @@ class CategoryMatcherService
      */
     private function findOrCreateBrand(string $brandName): ?Brand
     {
+        Log::info("جستجوی برند شروع شد", ['brand_name' => $brandName]);
+
         // جستجوی مستقیم
         $brand = Brand::where('name', $brandName)->first();
 
         if ($brand) {
+            Log::info("برند با جستجوی مستقیم یافت شد", [
+                'brand_id' => $brand->id,
+                'brand_name' => $brand->name
+            ]);
             return $brand;
         }
 
@@ -131,6 +172,11 @@ class CategoryMatcherService
         $brand = $this->fuzzySearchBrand($brandName);
 
         if ($brand) {
+            Log::info("برند با جستجوی فازی یافت شد", [
+                'brand_id' => $brand->id,
+                'brand_name' => $brand->name,
+                'original_name' => $brandName
+            ]);
             return $brand;
         }
 
@@ -145,23 +191,38 @@ class CategoryMatcherService
     {
         $normalizedName = $this->normalizeText($brandName);
 
+        Log::info("شروع جستجوی فازی برند", [
+            'original' => $brandName,
+            'normalized' => $normalizedName
+        ]);
+
         $brands = Brand::select(['id', 'name'])->get();
+
+        $bestMatch = null;
+        $bestSimilarity = 0;
 
         foreach ($brands as $brand) {
             $normalizedBrandName = $this->normalizeText($brand->name);
             $similarity = $this->calculateSimilarity($normalizedName, $normalizedBrandName);
 
-            if ($similarity > 85) {
-                Log::info("برند با جستجوی فازی یافت شد", [
-                    'original' => $brandName,
-                    'found' => $brand->name,
-                    'similarity' => $similarity
-                ]);
-                return $brand;
+            if ($similarity > $bestSimilarity && $similarity > 85) {
+                $bestMatch = $brand;
+                $bestSimilarity = $similarity;
             }
         }
 
-        return null;
+        if ($bestMatch) {
+            Log::info("بهترین تطبیق فازی برند یافت شد", [
+                'original' => $brandName,
+                'found' => $bestMatch->name,
+                'similarity' => $bestSimilarity,
+                'brand_id' => $bestMatch->id
+            ]);
+        } else {
+            Log::info("هیچ تطبیق فازی برای برند یافت نشد", ['brand_name' => $brandName]);
+        }
+
+        return $bestMatch;
     }
 
     /**
@@ -170,15 +231,20 @@ class CategoryMatcherService
     private function createBrand(string $brandName): ?Brand
     {
         try {
+            Log::info("شروع ایجاد برند جدید", ['brand_name' => $brandName]);
+
             $brand = Brand::create([
                 'name' => $brandName,
                 'slug' => $this->generateUniqueBrandSlug($brandName),
                 'nameSeo' => $brandName,
             ]);
 
-            Log::info("برند جدید ایجاد شد", [
+            $this->stats['brands_created']++;
+
+            Log::info("برند جدید با موفقیت ایجاد شد", [
+                'brand_id' => $brand->id,
                 'name' => $brandName,
-                'id' => $brand->id
+                'slug' => $brand->slug
             ]);
 
             return $brand;
@@ -186,7 +252,8 @@ class CategoryMatcherService
         } catch (\Exception $e) {
             Log::error("خطا در ایجاد برند جدید", [
                 'name' => $brandName,
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
             ]);
             return null;
         }
@@ -205,6 +272,11 @@ class CategoryMatcherService
             $slug = $originalSlug . '-' . $counter;
             $counter++;
         }
+
+        Log::info("Slug یکتا برای برند تولید شد", [
+            'original_text' => $text,
+            'slug' => $slug
+        ]);
 
         return $slug;
     }
@@ -545,6 +617,7 @@ class CategoryMatcherService
         $this->userId = $userId;
         return $this;
     }
+
     public function getUserId(): int
     {
         return $this->userId;
