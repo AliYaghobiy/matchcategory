@@ -20,6 +20,8 @@ class CategoryMatcherService
         'brands_assigned' => 0
     ];
 
+    private array $processedProducts = []; // محصولاتی که قبلاً پردازش شده‌اند
+
     public function __construct(int $userId = 39)
     {
         $this->userId = $userId;
@@ -40,17 +42,40 @@ class CategoryMatcherService
             throw new \Exception("خطا در خواندن فایل JSON");
         }
 
+        // مرحله اول: پردازش عناوین دقیق
+        Log::info("شروع مرحله اول: جستجوی دقیق عناوین");
         foreach ($jsonData as $item) {
-            $this->processItem($item);
+            $this->processItemExactMatch($item);
+        }
+
+        // مرحله دوم: پردازش عناوین مشابه (فقط آنهایی که در مرحله اول پردازش نشده‌اند)
+        Log::info("شروع مرحله دوم: جستجوی فازی عناوین");
+        foreach ($jsonData as $item) {
+            if (!$this->isItemProcessed($item)) {
+                $this->processItemFuzzyMatch($item);
+            }
         }
 
         return $this->getStats();
     }
 
     /**
-     * پردازش یک آیتم از فایل
+     * بررسی اینکه آیا آیتم قبلاً پردازش شده است
      */
-    private function processItem(array $item): void
+    private function isItemProcessed(array $item): bool
+    {
+        if (!isset($item['title'])) {
+            return true;
+        }
+
+        $normalizedTitle = $this->normalizeText($item['title']);
+        return in_array($normalizedTitle, $this->processedProducts);
+    }
+
+    /**
+     * پردازش آیتم با جستجوی دقیق
+     */
+    private function processItemExactMatch(array $item): void
     {
         $this->stats['processed']++;
 
@@ -59,13 +84,59 @@ class CategoryMatcherService
             return;
         }
 
-        $product = $this->findProduct($item['title']);
+        $product = $this->findProductExact($item['title']);
+
+        if (!$product) {
+            Log::info("محصول با جستجوی دقیق یافت نشد: {$item['title']}");
+            return;
+        }
+
+        $this->processMatchedProduct($product, $item);
+        $this->markItemAsProcessed($item['title']);
+    }
+
+    /**
+     * پردازش آیتم با جستجوی فازی
+     */
+    private function processItemFuzzyMatch(array $item): void
+    {
+        if (!isset($item['title']) || !isset($item['categories'])) {
+            return;
+        }
+
+        $product = $this->findProductFuzzy($item['title']);
 
         if (!$product) {
             $this->stats['not_found']++;
-            Log::info("محصول یافت نشد: {$item['title']}");
+            Log::info("محصول با جستجوی فازی یافت نشد: {$item['title']}");
             return;
         }
+
+        $this->processMatchedProduct($product, $item);
+        $this->markItemAsProcessed($item['title']);
+    }
+
+    /**
+     * علامت‌گذاری آیتم به عنوان پردازش شده
+     */
+    private function markItemAsProcessed(string $title): void
+    {
+        $normalizedTitle = $this->normalizeText($title);
+        if (!in_array($normalizedTitle, $this->processedProducts)) {
+            $this->processedProducts[] = $normalizedTitle;
+        }
+    }
+
+    /**
+     * پردازش محصول تطبیق یافته
+     */
+    private function processMatchedProduct(Product $product, array $item): void
+    {
+        Log::info("محصول تطبیق یافت", [
+            'product_id' => $product->id,
+            'product_title' => $product->title,
+            'json_title' => $item['title']
+        ]);
 
         // تخصیص دسته‌بندی‌ها
         $this->assignCategories($product, $item['categories']);
@@ -79,6 +150,143 @@ class CategoryMatcherService
         $this->assignSpecifications($product, $item);
 
         $this->stats['matched']++;
+    }
+
+    /**
+     * یافتن محصول با جستجوی دقیق
+     */
+    private function findProductExact(string $title): ?Product
+    {
+        return Product::where('user_id', $this->userId)
+            ->where('title', $title)
+            ->first();
+    }
+
+    /**
+     * یافتن محصول با جستجوی فازی بهبود یافته
+     */
+    private function findProductFuzzy(string $title): ?Product
+    {
+        $titleWords = $this->extractWords($title);
+
+        if (count($titleWords) < 3) {
+            Log::info("عنوان کمتر از 3 کلمه دارد، جستجوی فازی انجام نمی‌شود", [
+                'title' => $title,
+                'word_count' => count($titleWords)
+            ]);
+            return null;
+        }
+
+        // دریافت محصولاتی که هنوز پردازش نشده‌اند
+        $unprocessedProducts = $this->getUnprocessedProducts();
+
+        $bestMatch = null;
+        $bestScore = 0;
+
+        foreach ($unprocessedProducts as $product) {
+            $productWords = $this->extractWords($product->title);
+
+            $matchScore = $this->calculateWordMatchScore($titleWords, $productWords);
+
+            if ($matchScore >= 3 && $matchScore > $bestScore) {
+                $bestMatch = $product;
+                $bestScore = $matchScore;
+
+                Log::info("کاندید جدید برای تطبیق یافت شد", [
+                    'json_title' => $title,
+                    'product_title' => $product->title,
+                    'match_score' => $matchScore,
+                    'json_words' => $titleWords,
+                    'product_words' => $productWords
+                ]);
+            }
+        }
+
+        if ($bestMatch && $bestScore >= 3) {
+            Log::info("بهترین تطبیق فازی یافت شد", [
+                'json_title' => $title,
+                'product_title' => $bestMatch->title,
+                'final_score' => $bestScore,
+                'product_id' => $bestMatch->id
+            ]);
+        } else {
+            Log::info("هیچ تطبیق معتبری یافت نشد", [
+                'title' => $title,
+                'best_score' => $bestScore,
+                'minimum_required' => 3
+            ]);
+        }
+
+        return $bestMatch;
+    }
+
+    /**
+     * دریافت محصولاتی که هنوز پردازش نشده‌اند
+     */
+    private function getUnprocessedProducts(): \Illuminate\Database\Eloquent\Collection
+    {
+        $processedProductIds = [];
+
+        if (!empty($this->processedProducts)) {
+            // یافتن شناسه محصولاتی که قبلاً پردازش شده‌اند
+            $processedProductIds = Product::where('user_id', $this->userId)
+                ->get()
+                ->filter(function ($product) {
+                    $normalizedTitle = $this->normalizeText($product->title);
+                    return in_array($normalizedTitle, $this->processedProducts);
+                })
+                ->pluck('id')
+                ->toArray();
+        }
+
+        return Product::where('user_id', $this->userId)
+            ->when(!empty($processedProductIds), function ($query) use ($processedProductIds) {
+                return $query->whereNotIn('id', $processedProductIds);
+            })
+            ->select(['id', 'title'])
+            ->get();
+    }
+
+    /**
+     * استخراج کلمات معنادار از عنوان
+     */
+    private function extractWords(string $title): array
+    {
+        $normalizedTitle = $this->normalizeText($title);
+
+        // حذف کلمات بی‌معنا
+        $stopWords = ['و', 'در', 'با', 'به', 'از', 'برای', 'که', 'این', 'آن', 'تا', 'را', 'های'];
+
+        $words = explode(' ', $normalizedTitle);
+        $meaningfulWords = [];
+
+        foreach ($words as $word) {
+            $word = trim($word);
+            // حذف کلمات کوتاه‌تر از 2 کاراکتر و کلمات بی‌معنا
+            if (strlen($word) >= 2 && !in_array($word, $stopWords)) {
+                $meaningfulWords[] = $word;
+            }
+        }
+
+        return array_unique($meaningfulWords);
+    }
+
+    /**
+     * محاسبه امتیاز تطبیق کلمات
+     */
+    private function calculateWordMatchScore(array $titleWords, array $productWords): int
+    {
+        $commonWords = array_intersect($titleWords, $productWords);
+        $matchCount = count($commonWords);
+
+        Log::debug("محاسبه امتیاز تطبیق کلمات", [
+            'title_words' => $titleWords,
+            'product_words' => $productWords,
+            'common_words' => $commonWords,
+            'match_count' => $matchCount
+        ]);
+
+        return $matchCount;
     }
 
     /**
@@ -111,9 +319,9 @@ class CategoryMatcherService
             if ($brand) {
                 // اختصاص برند جدید با ساختار صحیح
                 DB::table('catables')->insert([
-                    'category_id' => $brand->id,  // ID برند
-                    'catables_id' => $product->id,  // ID محصول
-                    'catables_type' => 'App\\Models\\Product'  // نوع مدل: Product
+                    'category_id' => $brand->id,
+                    'catables_id' => $product->id,
+                    'catables_type' => 'App\\Models\\Product'
                 ]);
 
                 $this->stats['brands_assigned']++;
@@ -125,19 +333,6 @@ class CategoryMatcherService
                     'brand_name' => $brand->name,
                     'original_brand_name' => $brandName
                 ]);
-
-                // تأیید اختصاص با کوئری بررسی
-                $verification = DB::table('catables')
-                    ->where('category_id', $brand->id)
-                    ->where('catables_id', $product->id)
-                    ->where('catables_type', 'App\\Models\\Product')
-                    ->exists();
-
-                if ($verification) {
-                    Log::info("تأیید: برند در جدول catables ثبت شده است");
-                } else {
-                    Log::error("خطا: برند در جدول catables ثبت نشده است");
-                }
             }
 
         } catch (\Exception $e) {
@@ -341,59 +536,6 @@ class CategoryMatcherService
                 'error' => $e->getMessage()
             ]);
         }
-    }
-
-    /**
-     * یافتن محصول بر اساس عنوان
-     */
-    private function findProduct(string $title): ?Product
-    {
-        // جستجوی مستقیم
-        $product = Product::where('user_id', $this->userId)
-            ->where('title', $title)
-            ->first();
-
-        if ($product) {
-            return $product;
-        }
-
-        // جستجوی فازی
-        return $this->fuzzySearchProduct($title);
-    }
-
-    /**
-     * جستجوی فازی محصولات
-     */
-    private function fuzzySearchProduct(string $title): ?Product
-    {
-        $normalizedTitle = $this->normalizeText($title);
-
-        $products = Product::where('user_id', $this->userId)
-            ->select(['id', 'title'])
-            ->get();
-
-        $bestMatch = null;
-        $bestSimilarity = 0;
-
-        foreach ($products as $product) {
-            $normalizedProductTitle = $this->normalizeText($product->title);
-            $similarity = $this->calculateSimilarity($normalizedTitle, $normalizedProductTitle);
-
-            if ($similarity > $bestSimilarity && $similarity > 85) {
-                $bestMatch = $product;
-                $bestSimilarity = $similarity;
-            }
-        }
-
-        if ($bestMatch && $bestSimilarity > 90) {
-            Log::info("محصول با جستجوی فازی یافت شد", [
-                'original' => $title,
-                'found' => $bestMatch->title,
-                'similarity' => $bestSimilarity
-            ]);
-        }
-
-        return $bestMatch;
     }
 
     /**
@@ -606,7 +748,10 @@ class CategoryMatcherService
             ? round(($this->stats['matched'] / $this->stats['processed']) * 100, 2)
             : 0;
 
-        return array_merge($this->stats, ['success_rate' => $successRate]);
+        return array_merge($this->stats, [
+            'success_rate' => $successRate,
+            'processed_products_count' => count($this->processedProducts)
+        ]);
     }
 
     /**
@@ -621,5 +766,22 @@ class CategoryMatcherService
     public function getUserId(): int
     {
         return $this->userId;
+    }
+
+    /**
+     * ریست کردن وضعیت پردازش
+     */
+    public function resetProcessingState(): self
+    {
+        $this->processedProducts = [];
+        $this->stats = [
+            'processed' => 0,
+            'matched' => 0,
+            'not_found' => 0,
+            'categories_created' => 0,
+            'brands_created' => 0,
+            'brands_assigned' => 0
+        ];
+        return $this;
     }
 }
