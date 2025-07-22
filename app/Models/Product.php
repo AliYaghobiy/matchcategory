@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\MorphToMany;
 
 class Product extends Model
 {
@@ -35,14 +36,19 @@ class Product extends Model
             'category_id'
         );
     }
-    public function brands(): BelongsToMany
+
+    /**
+     * رابطه many-to-many با برندها از طریق جدول brandables
+     */
+    public function brands(): MorphToMany
     {
         return $this->morphToMany(
             Brand::class,
-            'catables',
-            'catables',
-            'catables_id',
-            'category_id'
+            'brandables',
+            'brandables',
+            'brandables_id',   // کلید محصول در جدول brandables
+            'brand_id'         // کلید برند در جدول brandables
         );
     }
 }
+

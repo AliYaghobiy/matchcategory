@@ -301,38 +301,40 @@ class CategoryMatcherService
                 'brand_name' => $brandName
             ]);
 
-            // حذف برندهای قبلی محصول
-            DB::table('catables')
-                ->where('catables_id', $product->id)
-                ->where('catables_type', 'App\\Models\\Product')
-                ->whereExists(function ($query) {
-                    $query->select(DB::raw(1))
-                        ->from('brands')
-                        ->whereColumn('brands.id', 'catables.category_id');
-                })
-                ->delete();
-
-            Log::info("برندهای قبلی محصول حذف شدند", ['product_id' => $product->id]);
-
             $brand = $this->findOrCreateBrand($brandName);
 
             if ($brand) {
-                // اختصاص برند جدید با ساختار صحیح
-                DB::table('catables')->insert([
-                    'category_id' => $brand->id,
-                    'catables_id' => $product->id,
-                    'catables_type' => 'App\\Models\\Product'
-                ]);
+                // بررسی اینکه آیا این برند قبلاً به محصول اختصاص داده شده است
+                $existingRelation = DB::table('brandables')
+                    ->where('brandables_id', $product->id)
+                    ->where('brandables_type', 'App\\Models\\Product')
+                    ->where('brand_id', $brand->id)
+                    ->exists();
 
-                $this->stats['brands_assigned']++;
+                if (!$existingRelation) {
+                    // اختصاص برند جدید با ساختار صحیح در جدول brandables
+                    DB::table('brandables')->insert([
+                        'brand_id' => $brand->id,
+                        'brandables_id' => $product->id,
+                        'brandables_type' => 'App\\Models\\Product'
+                    ]);
 
-                Log::info("برند با موفقیت به محصول اختصاص داده شد", [
-                    'product_id' => $product->id,
-                    'product_title' => $product->title,
-                    'brand_id' => $brand->id,
-                    'brand_name' => $brand->name,
-                    'original_brand_name' => $brandName
-                ]);
+                    $this->stats['brands_assigned']++;
+
+                    Log::info("برند با موفقیت به محصول اختصاص داده شد", [
+                        'product_id' => $product->id,
+                        'product_title' => $product->title,
+                        'brand_id' => $brand->id,
+                        'brand_name' => $brand->name,
+                        'original_brand_name' => $brandName
+                    ]);
+                } else {
+                    Log::info("برند قبلاً به محصول اختصاص داده شده بود", [
+                        'product_id' => $product->id,
+                        'brand_id' => $brand->id,
+                        'brand_name' => $brand->name
+                    ]);
+                }
             }
 
         } catch (\Exception $e) {
@@ -344,7 +346,6 @@ class CategoryMatcherService
             ]);
         }
     }
-
     /**
      * یافتن یا ایجاد برند
      */

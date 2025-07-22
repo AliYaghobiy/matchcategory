@@ -12,16 +12,16 @@ class Brand extends Model
     ];
 
     /**
-     * رابطه many-to-many با محصولات از طریق جدول catables
+     * رابطه many-to-many با محصولات از طریق جدول brandables
      */
     public function products(): MorphToMany
     {
         return $this->morphedByMany(
             Product::class,
-            'catables',
-            'catables',
-            'category_id',
-            'catables_id'
+            'brandables',
+            'brandables',
+            'brand_id',        // کلید برند در جدول brandables
+            'brandables_id'    // کلید محصول در جدول brandables
         );
     }
 }
