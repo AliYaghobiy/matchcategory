@@ -188,7 +188,7 @@ class CategoryMatcherService
 
             $matchScore = $this->calculateWordMatchScore($titleWords, $productWords);
 
-            if ($matchScore >= 3 && $matchScore > $bestScore) {
+            if ($matchScore >= 2 && $matchScore > $bestScore) {
                 $bestMatch = $product;
                 $bestScore = $matchScore;
 
@@ -490,6 +490,10 @@ class CategoryMatcherService
             if (isset($item['specifications']['key_specs']) && is_array($item['specifications']['key_specs'])) {
                 foreach ($item['specifications']['key_specs'] as $spec) {
                     if (isset($spec['title']) && isset($spec['body'])) {
+                        // فیلتر کردن داده‌های نامعتبر ترب
+                        if ($spec['title'] === 'ترب' && $spec['body'] === 'ورود / ثبت نام') {
+                            continue;
+                        }
                         $property[] = [
                             'title' => $spec['title'],
                             'body' => $spec['body']
@@ -502,6 +506,10 @@ class CategoryMatcherService
             if (isset($item['specifications']['general_specs']) && is_array($item['specifications']['general_specs'])) {
                 foreach ($item['specifications']['general_specs'] as $spec) {
                     if (isset($spec['title']) && isset($spec['body'])) {
+                        // فیلتر کردن داده‌های نامعتبر ترب
+                        if ($spec['title'] === 'ترب' && $spec['body'] === 'ورود / ثبت نام') {
+                            continue;
+                        }
                         $specifications[] = [
                             'title' => $spec['title'],
                             'body' => $spec['body']
@@ -626,7 +634,7 @@ class CategoryMatcherService
             $normalizedCatName = $this->normalizeText($category->name);
             $similarity = $this->calculateSimilarity($normalizedName, $normalizedCatName);
 
-            if ($similarity > 85) {
+            if ($similarity > 75) {
                 Log::info("دسته‌بندی با جستجوی فازی یافت شد", [
                     'original' => $categoryName,
                     'found' => $category->name,
